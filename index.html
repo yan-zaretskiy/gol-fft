@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Conway's Game of Life (FFT in JS)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { 
+            font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+            overscroll-behavior: none; 
+        }
+        canvas {
+            border: 1px solid #D1D5DB; /* gray-300 */
+            cursor: pointer;
+            touch-action: none; 
+        }
+        .game-button {
+            @apply bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-150 ease-in-out transform hover:scale-105;
+        }
+        .game-button-red {
+            @apply bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-150 ease-in-out transform hover:scale-105;
+        }
+        .game-button-green {
+            @apply bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg shadow-md transition-all duration-150 ease-in-out transform hover:scale-105;
+        }
+        /* Custom message box for alerts/info */
+        #messageBox {
+            transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+        }
+        #messageBox.hidden {
+            opacity: 0;
+            transform: translate(-50%, -60%);
+            pointer-events: none;
+        }
+        #messageBox:not(.hidden) {
+            opacity: 1;
+            transform: translate(-50%, -50%);
+        }
+        /* Ensure inputs are consistently sized */
+        input[type="number"], select {
+            @apply p-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 flex flex-col items-center min-h-screen p-4">
+
+    <div class="w-full max-w-4xl bg-white p-6 rounded-xl shadow-2xl">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-gray-800">Conway's Game of Life</h1>
+            <p class="text-sm text-gray-600">FFT-based Simulation</p>
+        </header>
+
+        <div class="controls mb-6 p-4 bg-gray-50 rounded-lg shadow-inner">
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 items-end">
+                <div>
+                    <label for="boardSizeInput" class="block text-sm font-medium text-gray-700 mb-1">Board Size (2^N):</label>
+                    <input type="number" id="boardSizeInput" value="64" class="w-full">
+                </div>
+                <div>
+                    <label for="initialPatternSelect" class="block text-sm font-medium text-gray-700 mb-1">Initial Pattern:</label>
+                    <select id="initialPatternSelect" class="w-full">
+                        <option value="draw">Draw Custom</option>
+                        <option value="glider" selected>Glider</option>
+                        <option value="blinker">Blinker</option>
+                        <option value="random">Random (25%)</option>
+                        <option value="random_50">Random (50%)</option>
+                    </select>
+                </div>
+                <button id="initializeButton" class="game-button sm:col-span-2 md:col-span-1 h-10">Initialize / Reset Grid</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-4 items-end">
+                <button id="startStopButton" class="game-button-green h-10">Start</button>
+                <button id="nextStepButton" class="game-button h-10">Next Step</button>
+                <div>
+                    <label for="speedInput" class="block text-sm font-medium text-gray-700 mb-1">Speed (ms/step):</label>
+                    <input type="number" id="speedInput" value="100" min="10" max="2000" class="w-full">
+                </div>
+            </div>
+        </div>
+
+        <div class="canvas-container flex justify-center mb-2">
+            <canvas id="gameCanvas"></canvas>
+        </div>
+        <div id="generationDisplay" class="text-center text-gray-700 font-semibold mb-4">Generation: 0</div>
+        
+        <div id="messageBox" class="hidden fixed top-1/2 left-1/2 w-11/12 max-w-md p-6 rounded-xl shadow-2xl text-white z-50">
+            <p id="messageText" class="text-center"></p>
+            <button id="messageCloseButton" class="mt-4 w-full font-bold py-2 px-4 rounded-lg transition-colors duration-150">Close</button>
+        </div>
+
+        <footer class="mt-8 p-4 bg-gray-50 rounded-lg shadow-inner text-sm text-gray-600">
+            <h2 class="text-lg font-semibold text-gray-800 mb-2">Instructions:</h2>
+            <ol class="list-decimal list-inside space-y-1">
+                <li>Set "Board Size" (e.g., 32, 64, 128 - must be a power of 2).</li>
+                <li>Choose an "Initial Pattern".
+                    <ul class="list-disc list-inside ml-4">
+                        <li>If "Draw Custom", click "Initialize/Reset Grid", then click cells on the grid to toggle them.</li>
+                        <li>For pre-made patterns, just click "Initialize/Reset Grid".</li>
+                    </ul>
+                </li>
+                <li>Adjust "Speed" if desired (lower ms = faster).</li>
+                <li>Click "Start" to run. "Stop" to pause.</li>
+                <li>"Next Step" advances one generation (when paused).</li>
+            </ol>
+        </footer>
+    </div>
+
+    <script>
+        // --- Embedded FFT Library (fft.js) ---
+        const FFT = (() => {
+            // core operations
+            let _n = 0; // order
+            let _bitrev = null; // bit reversal table
+            let _cstb = null; // sin/cos table
+
+            function init(n) {
+                if (n !== 0 && (n & (n - 1)) === 0) {
+                    _n = n;
+                    _initArray();
+                    _makeBitReversalTable();
+                    _makeCosSinTable();
+                } else {
+                    throw new Error("FFT init: radix-2 required (size must be a power of 2).");
+                }
+            }
+
+            function fft1d(re, im) { fastFourierTransform(re, im, 1); }
+            function ifft1d(re, im) {
+                let n_inv = 1 / _n;
+                fastFourierTransform(re, im, -1);
+                for (let i = 0; i < _n; i++) {
+                    re[i] *= n_inv;
+                    im[i] *= n_inv;
+                }
+            }
+
+            function fft2d(re, im) {
+                let tre = new Float64Array(_n);
+                let tim = new Float64Array(_n);
+                let i = 0;
+                // x-axis
+                for (let y = 0; y < _n; y++) {
+                    i = y * _n;
+                    for (let x1 = 0; x1 < _n; x1++) { tre[x1] = re[x1 + i]; tim[x1] = im[x1 + i]; }
+                    fft1d(tre, tim);
+                    for (let x2 = 0; x2 < _n; x2++) { re[x2 + i] = tre[x2]; im[x2 + i] = tim[x2]; }
+                }
+                // y-axis
+                for (let x = 0; x < _n; x++) {
+                    for (let y1 = 0; y1 < _n; y1++) { i = x + y1 * _n; tre[y1] = re[i]; tim[y1] = im[i]; }
+                    fft1d(tre, tim);
+                    for (let y2 = 0; y2 < _n; y2++) { i = x + y2 * _n; re[i] = tre[y2]; im[i] = tim[y2]; }
+                }
+            }
+
+            function ifft2d(re, im) {
+                let tre = new Float64Array(_n);
+                let tim = new Float64Array(_n);
+                let i = 0;
+                // x-axis (or y-axis first, order for 2D IFFT can be swapped if consistent)
+                for (let y = 0; y < _n; y++) {
+                    i = y * _n;
+                    for (let x1 = 0; x1 < _n; x1++) { tre[x1] = re[x1 + i]; tim[x1] = im[x1 + i]; }
+                    ifft1d(tre, tim); // ifft1d handles 1/_n scaling for its dimension
+                    for (let x2 = 0; x2 < _n; x2++) { re[x2 + i] = tre[x2]; im[x2 + i] = tim[x2]; }
+                }
+                // y-axis
+                for (let x = 0; x < _n; x++) {
+                    for (let y1 = 0; y1 < _n; y1++) { i = x + y1 * _n; tre[y1] = re[i]; tim[y1] = im[i]; }
+                    ifft1d(tre, tim); // ifft1d handles 1/_n scaling for its dimension
+                                      // Total scaling for ifft2d becomes 1/(_n*_n)
+                    for (let y2 = 0; y2 < _n; y2++) { i = x + y2 * _n; re[i] = tre[y2]; im[i] = tim[y2]; }
+                }
+            }
+
+            function fastFourierTransform(re, im, inv) {
+                let d, h, ik, m, tmp, wr, wi, xr, xi;
+                let n4 = _n >> 2;
+                for (let l = 0; l < _n; l++) {
+                    m = _bitrev[l];
+                    if (l < m) {
+                        tmp = re[l]; re[l] = re[m]; re[m] = tmp;
+                        tmp = im[l]; im[l] = im[m]; im[m] = tmp;
+                    }
+                }
+                for (let k = 1; k < _n; k <<= 1) {
+                    h = 0; d = _n / (k << 1);
+                    for (let j = 0; j < k; j++) {
+                        wr = _cstb[h + n4]; wi = inv * _cstb[h];
+                        for (let i = j; i < _n; i += (k << 1)) {
+                            ik = i + k;
+                            xr = wr * re[ik] + wi * im[ik];
+                            xi = wr * im[ik] - wi * re[ik];
+                            re[ik] = re[i] - xr; re[i] += xr;
+                            im[ik] = im[i] - xi; im[i] += xi;
+                        }
+                        h += d;
+                    }
+                }
+            }
+            function _initArray() {
+                _bitrev = (typeof Uint32Array !== "undefined") ? new Uint32Array(_n) : [];
+                _cstb = (typeof Float64Array !== "undefined") ? new Float64Array(_n * 1.25) : [];
+            }
+            function _makeBitReversalTable() {
+                let i = 0, j = 0, k = 0; _bitrev[0] = 0;
+                while (++i < _n) {
+                    k = _n >> 1;
+                    while (k <= j) { j -= k; k >>= 1; }
+                    j += k; _bitrev[i] = j;
+                }
+            }
+            function _makeCosSinTable() {
+                let n2 = _n >> 1, n4 = _n >> 2, n8 = _n >> 3;
+                let t = Math.sin(Math.PI / _n), dc = 2 * t * t, ds = Math.sqrt(dc * (2 - dc));
+                let c = (_cstb[n4] = 1), s = (_cstb[0] = 0); t = 2 * dc;
+                for (let i = 1; i < n8; i++) {
+                    c -= dc; dc += t * c; s += ds; ds -= t * s;
+                    _cstb[i] = s; _cstb[n4 - i] = c;
+                }
+                if (n8 !== 0) { _cstb[n8] = Math.sqrt(0.5); }
+                for (let j = 0; j < n4; j++) { _cstb[n2 - j] = _cstb[j]; }
+                for (let k = 0; k < n2 + n4; k++) { _cstb[k + n2] = -_cstb[k]; }
+            }
+            return { init, fft2d, ifft2d };
+        })();
+
+        // --- ConwayGameOfLife using FFT ---
+        class ConwayGameOfLife {
+            constructor(size, initialSetup) {
+                if (size <= 0 || (size & (size - 1)) !== 0) {
+                    throw new Error('Board size must be a positive power of 2.');
+                }
+                this.size = size;
+                FFT.init(size);
+
+                if (typeof initialSetup === 'string') {
+                    if (initialSetup === "glider") this.board = this._createGliderBoard();
+                    else if (initialSetup === "blinker") this.board = this._createBlinkerBoard();
+                    else if (initialSetup === "random") this.board = this._createRandomBoard(0.25);
+                    else if (initialSetup === "random_50") this.board = this._createRandomBoard(0.50);
+                    else this.board = this._createEmptyBoard(); // Default to empty if unknown string
+                } else if (typeof initialSetup === 'number') { // Probability for random
+                    this.board = this._createRandomBoard(initialSetup);
+                } else if (Array.isArray(initialSetup)) { // Direct board input
+                    this.board = initialSetup;
+                } else {
+                    this.board = this._createEmptyBoard();
+                }
+                
+                const spatialKernel = this._createKernelWithCenter10(); 
+                const kernelFlatRe = new Float64Array(size * size);
+                const kernelFlatIm = new Float64Array(size * size);
+                this._matrixToFlat(spatialKernel, kernelFlatRe);
+                FFT.fft2d(kernelFlatRe, kernelFlatIm); 
+                this.fftKernelRe = kernelFlatRe; 
+            }
+
+            _createEmptyBoard() {
+                return Array(this.size).fill(null).map(() => Array(this.size).fill(0));
+            }
+            _createRandomBoard(probability) {
+                const board = this._createEmptyBoard();
+                for (let r = 0; r < this.size; r++) {
+                    for (let c = 0; c < this.size; c++) {
+                        if (Math.random() < probability) board[r][c] = 1;
+                    }
+                }
+                return board;
+            }
+            _createGliderBoard() {
+                const board = this._createEmptyBoard();
+                if (this.size < 3) return board;
+                const rO = this.size > 4 ? 1:0, cO = this.size > 4 ? 1:0;
+                if(rO+2 < this.size && cO+2 < this.size){
+                    board[rO+0][cO+1] = 1; board[rO+1][cO+2] = 1;
+                    board[rO+2][cO+0] = 1; board[rO+2][cO+1] = 1; board[rO+2][cO+2] = 1;
+                }
+                return board;
+            }
+            _createBlinkerBoard() {
+                const board = this._createEmptyBoard();
+                if (this.size < 3) return board;
+                const midR = Math.floor(this.size / 2), midC = Math.floor(this.size / 2);
+                if(midR > 0 && midR < this.size -1 && midC < this.size){
+                    board[midR-1][midC]=1; board[midR][midC]=1; board[midR+1][midC]=1;
+                }
+                return board;
+            }
+            _createKernelWithCenter10() {
+                const kernel = Array(this.size).fill(null).map(() => Array(this.size).fill(0));
+                const N = this.size;
+                const neighborOffsets = [[-1,-1],[-1,0],[-1,1],[0,-1],[0,1],[1,-1],[1,0],[1,1]];
+                for (const [dr, dc] of neighborOffsets) {
+                    kernel[(dr+N)%N][(dc+N)%N] = 1;
+                }
+                kernel[0][0] = 10; 
+                return kernel;
+            }
+            _matrixToFlat(matrix, flatRe) {
+                for (let r = 0; r < this.size; r++) {
+                    for (let c = 0; c < this.size; c++) {
+                        flatRe[r * this.size + c] = matrix[r][c];
+                    }
+                }
+            }
+            update() {
+                const N = this.size; const totalSize = N * N;
+                const boardFlatRe = new Float64Array(totalSize);
+                const boardFlatIm = new Float64Array(totalSize);
+                this._matrixToFlat(this.board, boardFlatRe);
+                FFT.fft2d(boardFlatRe, boardFlatIm); 
+                const productRe = new Float64Array(totalSize);
+                const productIm = new Float64Array(totalSize);
+                for (let i = 0; i < totalSize; i++) {
+                    const a = boardFlatRe[i], b = boardFlatIm[i], c = this.fftKernelRe[i];
+                    productRe[i] = a * c; productIm[i] = b * c;
+                }
+                FFT.ifft2d(productRe, productIm); 
+                const newBoard = this._createEmptyBoard();
+                for (let r = 0; r < N; r++) {
+                    for (let c = 0; c < N; c++) {
+                        const convolutionValue = Math.round(productRe[r * N + c]);
+                        if (convolutionValue === 3 || convolutionValue === 12 || convolutionValue === 13) {
+                            newBoard[r][c] = 1; 
+                        }
+                    }
+                }
+                this.board = newBoard;
+                return this.board;
+            }
+            getBoard() { return this.board; }
+        }
+
+        // --- UI and Game Control Logic ---
+        document.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const ctx = canvas.getContext('2d');
+            const boardSizeInput = document.getElementById('boardSizeInput');
+            const initialPatternSelect = document.getElementById('initialPatternSelect');
+            const initializeButton = document.getElementById('initializeButton');
+            const startStopButton = document.getElementById('startStopButton');
+            const nextStepButton = document.getElementById('nextStepButton');
+            const speedInput = document.getElementById('speedInput');
+            const generationDisplay = document.getElementById('generationDisplay');
+            
+            const messageBox = document.getElementById('messageBox');
+            const messageText = document.getElementById('messageText');
+            const messageCloseButton = document.getElementById('messageCloseButton');
+
+            let game = null;
+            let currentBoardSize = 0;
+            let cellSize = 10;
+            let isRunning = false;
+            let animationFrameId = null;
+            let generation = 0;
+            let stepInterval = 100;
+            let currentPatternMode = 'glider'; // Default
+            let tempSetupBoard = null; // For "draw" mode
+
+            const CELL_COLOR_ALIVE = '#374151'; // Tailwind gray-700
+            const CELL_COLOR_DEAD = '#F3F4F6';  // Tailwind gray-100
+            const GRID_COLOR = '#D1D5DB';       // Tailwind gray-300
+            const MAX_CANVAS_WIDTH_PX = 512; 
+
+            function showUIMessage(text, isError = false) {
+                messageText.textContent = text;
+                messageBox.classList.remove('hidden');
+                messageBox.classList.toggle('bg-red-600', isError);
+                messageBox.classList.toggle('bg-blue-600', !isError);
+                messageCloseButton.classList.toggle('bg-red-700', isError);
+                messageCloseButton.classList.toggle('bg-blue-700', !isError);
+                messageCloseButton.classList.toggle('hover:bg-red-800', isError);
+                messageCloseButton.classList.toggle('hover:bg-blue-800', !isError);
+            }
+            messageCloseButton.addEventListener('click', () => messageBox.classList.add('hidden'));
+
+
+            function drawGrid() {
+                if (!game && !tempSetupBoard) return;
+                const boardToDraw = game ? game.getBoard() : tempSetupBoard;
+                if (!boardToDraw) return;
+
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                for (let r = 0; r < currentBoardSize; r++) {
+                    for (let c = 0; c < currentBoardSize; c++) {
+                        ctx.fillStyle = boardToDraw[r][c] === 1 ? CELL_COLOR_ALIVE : CELL_COLOR_DEAD;
+                        ctx.fillRect(c * cellSize, r * cellSize, cellSize, cellSize);
+                    }
+                }
+                if (cellSize > 3) { // Only draw grid lines if cells are reasonably large
+                    ctx.strokeStyle = GRID_COLOR;
+                    ctx.lineWidth = 0.5;
+                    for (let i = 0; i <= currentBoardSize; i++) {
+                        ctx.beginPath(); ctx.moveTo(i * cellSize, 0); ctx.lineTo(i * cellSize, canvas.height); ctx.stroke();
+                        ctx.beginPath(); ctx.moveTo(0, i * cellSize); ctx.lineTo(canvas.width, i * cellSize); ctx.stroke();
+                    }
+                }
+                generationDisplay.textContent = `Generation: ${generation}`;
+            }
+
+            function initializeGame() {
+                if (isRunning) stopSimulation();
+                
+                const size = parseInt(boardSizeInput.value, 10);
+                if (isNaN(size) || size <= 0 || (size & (size - 1)) !== 0) {
+                    showUIMessage("Board size must be a positive power of 2 (e.g., 16, 32, 64).", true);
+                    return;
+                }
+                currentBoardSize = size;
+                currentPatternMode = initialPatternSelect.value;
+                
+                const displaySize = Math.min(MAX_CANVAS_WIDTH_PX, window.innerWidth - 40);
+                canvas.width = displaySize;
+                canvas.height = displaySize;
+                cellSize = displaySize / currentBoardSize;
+                
+                generation = 0;
+                game = null; // Clear previous game instance
+                tempSetupBoard = null;
+
+                if (currentPatternMode === 'draw') {
+                    tempSetupBoard = Array(currentBoardSize).fill(null).map(() => Array(currentBoardSize).fill(0));
+                    showUIMessage("Grid initialized. Click cells to draw your pattern, then click Start.", false);
+                } else {
+                    try {
+                        game = new ConwayGameOfLife(currentBoardSize, currentPatternMode);
+                    } catch (e) {
+                        showUIMessage(`Error initializing game: ${e.message}`, true);
+                        return;
+                    }
+                    showUIMessage(`Initialized with '${currentPatternMode}' pattern. Ready to Start.`, false);
+                }
+                drawGrid();
+            }
+            
+            function handleCanvasClick(event) {
+                if (isRunning || !currentBoardSize) return;
+                if (currentPatternMode !== 'draw' && !game) { // If not in draw mode and game not started from a pattern
+                     showUIMessage("Initialize the grid with 'Draw Custom' selected to enable drawing.", true);
+                     return;
+                }
+                if (currentPatternMode !== 'draw' && game) {
+                    showUIMessage("Drawing is only enabled if 'Draw Custom' was selected at initialization. Reset to draw.", true);
+                    return;
+                }
+
+
+                const rect = canvas.getBoundingClientRect();
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
+                const c = Math.floor(x / cellSize);
+                const r = Math.floor(y / cellSize);
+
+                if (r >= 0 && r < currentBoardSize && c >= 0 && c < currentBoardSize) {
+                    if (tempSetupBoard) { // Drawing on the temporary setup board
+                        tempSetupBoard[r][c] = 1 - tempSetupBoard[r][c];
+                    }
+                    drawGrid();
+                }
+            }
+
+            function stepGame() {
+                if (!game) {
+                    if (currentPatternMode === 'draw' && tempSetupBoard) {
+                        try {
+                            game = new ConwayGameOfLife(currentBoardSize, tempSetupBoard); // Create game from drawn board
+                            tempSetupBoard = null; // Clear temp board
+                             showUIMessage("Started simulation with drawn pattern.", false);
+                        } catch (e) {
+                            showUIMessage(`Error starting game: ${e.message}`, true);
+                            isRunning = false; // Ensure it doesn't try to run
+                            return;
+                        }
+                    } else {
+                        showUIMessage("Initialize the grid first or ensure a pattern is loaded.", true);
+                        return;
+                    }
+                }
+                game.update();
+                generation++;
+                drawGrid();
+            }
+
+            let lastFrameTime = 0;
+            function gameLoop(timestamp) {
+                if (!isRunning) {
+                    animationFrameId = null; return;
+                }
+                if (timestamp - lastFrameTime >= stepInterval) {
+                    lastFrameTime = timestamp - ((timestamp - lastFrameTime) % stepInterval);
+                    stepGame();
+                }
+                animationFrameId = requestAnimationFrame(gameLoop);
+            }
+
+            function startSimulation() {
+                if (!game && !(currentPatternMode === 'draw' && tempSetupBoard)) {
+                    showUIMessage("Please initialize the grid first.", true);
+                    return;
+                }
+                isRunning = true;
+                startStopButton.textContent = 'Stop';
+                startStopButton.classList.remove('game-button-green');
+                startStopButton.classList.add('game-button-red');
+                lastFrameTime = performance.now();
+                if (!animationFrameId) animationFrameId = requestAnimationFrame(gameLoop);
+            }
+            function stopSimulation() {
+                isRunning = false;
+                startStopButton.textContent = 'Start';
+                startStopButton.classList.add('game-button-green');
+                startStopButton.classList.remove('game-button-red');
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                    animationFrameId = null;
+                }
+            }
+            
+            initializeButton.addEventListener('click', initializeGame);
+            startStopButton.addEventListener('click', () => {
+                if (isRunning) stopSimulation(); else startSimulation();
+            });
+            nextStepButton.addEventListener('click', () => {
+                if (isRunning) {
+                    showUIMessage("Stop the simulation to use 'Next Step'.", true);
+                    return;
+                }
+                if (!game && !(currentPatternMode === 'draw' && tempSetupBoard)) {
+                     showUIMessage("Initialize the grid first.", true);
+                    return;
+                }
+                stepGame();
+            });
+            canvas.addEventListener('click', handleCanvasClick);
+            speedInput.addEventListener('change', () => {
+                const newSpeed = parseInt(speedInput.value, 10);
+                if (!isNaN(newSpeed) && newSpeed >= 10 && newSpeed <= 5000) {
+                    stepInterval = newSpeed;
+                } else {
+                    showUIMessage("Speed must be between 10 and 5000 ms.", true);
+                    speedInput.value = stepInterval;
+                }
+            });
+
+            // Initial setup
+            stepInterval = parseInt(speedInput.value, 10);
+            initializeGame(); // Initialize with default values on page load
+        });
+    </script>
+</body>
+</html>
